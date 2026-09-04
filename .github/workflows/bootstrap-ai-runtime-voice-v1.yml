@@ -12,6 +12,8 @@ jobs:
     env:
       PIPER_VERSION: "1.7.0"
       PIPER_VOICES_COMMIT: "320d5f7f7751a17ef6512d5c23863056c6a11c0f"
+      WHISPER_RELEASE: "b4938"
+      WHISPER_MODEL_COMMIT: "0b364b566045a405be7225ee1e415a073e04da77"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,6 +26,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg zstd
+
       - name: Build Piper runtime and bilingual voice packs
         shell: bash
         run: |
@@ -66,16 +69,67 @@ jobs:
           tar --zstd -C "$ROOT/piper" -cf "$RUNNER_TEMP/out/ai-runtime-media-voice-core-bootstrap-v1.tar.zst" .
           tar --zstd -C "$ROOT/en" -cf "$RUNNER_TEMP/out/ai-runtime-voice-en-piper-v1.tar.zst" .
           tar --zstd -C "$ROOT/vi" -cf "$RUNNER_TEMP/out/ai-runtime-voice-vi-piper-v1.tar.zst" .
-          sha256sum "$RUNNER_TEMP/out/"*.tar.zst > "$RUNNER_TEMP/out/SHA256SUMS-piper.txt"
+          sha256sum "$RUNNER_TEMP/out/"ai-runtime-*piper-v1.tar.zst "$RUNNER_TEMP/out/ai-runtime-media-voice-core-bootstrap-v1.tar.zst" 2>/dev/null | sort -u > "$RUNNER_TEMP/out/SHA256SUMS-piper.txt"
 
-      - name: RED - assert missing Whisper artifacts
+      - name: Build Whisper multilingual alignment pack
         shell: bash
         run: |
           set -euo pipefail
-          WHISPER_BIN="$RUNNER_TEMP/ai-runtime-whisper/bin/whisper-cli"
-          WHISPER_MODEL="$RUNNER_TEMP/ai-runtime-whisper/models/ggml-base.bin"
+          ROOT="$RUNNER_TEMP/ai-runtime-whisper"
+          mkdir -p "$ROOT/bin" "$ROOT/dist" "$ROOT/models" "$RUNNER_TEMP/out"
+
+          ARCHIVE="$RUNNER_TEMP/whisper-bin-ubuntu-x64.tar.gz"
+          curl -fL --retry 3 "https://github.com/ggml-org/whisper.cpp/releases/download/${WHISPER_RELEASE}/whisper-bin-ubuntu-x64.tar.gz" -o "$ARCHIVE"
+          echo "f4cfc1f969a13805908fb72043ce7cc896eb42e0b8afbe841dc8e7298923b061  $ARCHIVE" | sha256sum -c -
+          tar -xzf "$ARCHIVE" -C "$ROOT/dist"
+
+          REAL_BIN="$(find "$ROOT/dist" -type f -name whisper-cli -perm -111 -print -quit)"
+          test -n "$REAL_BIN"
+          cat > "$ROOT/bin/whisper-cli" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          DIST="$HERE/../dist"
+          REAL_BIN="$(find "$DIST" -type f -name whisper-cli -perm -111 -print -quit)"
+          [[ -n "$REAL_BIN" ]] || { echo "whisper-cli binary missing under $DIST" >&2; exit 1; }
+          LIB_DIRS="$(find "$DIST" -type f -name 'lib*.so*' -printf '%h\n' | sort -u | paste -sd: -)"
+          export LD_LIBRARY_PATH="${LIB_DIRS}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          exec "$REAL_BIN" "$@"
+          SH
+          chmod +x "$ROOT/bin/whisper-cli"
+
+          curl -fL --retry 3 "https://huggingface.co/ggerganov/whisper.cpp/resolve/${WHISPER_MODEL_COMMIT}/ggml-base.bin" -o "$ROOT/models/ggml-base.bin"
+          echo "465707469ff3a37a2b9b8d8f89f2f99de7299dac  $ROOT/models/ggml-base.bin" | sha1sum -c -
+
+          WHISPER_BIN="$ROOT/bin/whisper-cli"
+          WHISPER_MODEL="$ROOT/models/ggml-base.bin"
           test -x "$WHISPER_BIN"
           test -s "$WHISPER_MODEL"
+
+          "$WHISPER_BIN" -m "$WHISPER_MODEL" -f /tmp/en.wav -l en -ojf -ml 40 -sow -of /tmp/en-whisper -np
+          "$WHISPER_BIN" -m "$WHISPER_MODEL" -f /tmp/vi.wav -l vi -ojf -ml 40 -sow -of /tmp/vi-whisper -np
+
+          python3 - <<'PY'
+          import json
+          for path in ['/tmp/en-whisper.json', '/tmp/vi-whisper.json']:
+              data = json.load(open(path, encoding='utf-8'))
+              segments = data.get('transcription') or data.get('segments') or []
+              assert segments, f'no ASR segments in {path}'
+              timed = []
+              for seg in segments:
+                  for tok in seg.get('tokens') or []:
+                      ts = tok.get('timestamps') or {}
+                      if tok.get('text', '').strip() and ts.get('from') is not None and ts.get('to') is not None:
+                          timed.append(tok)
+              assert timed, f'no token timestamps in {path}'
+              print(path, 'segments=', len(segments), 'timed_tokens=', len(timed))
+          PY
+
+          cat > "$ROOT/manifest.json" <<EOF
+          {"name":"ai-runtime-captions-whisper-v1","whisperRelease":"${WHISPER_RELEASE}","binarySha256":"f4cfc1f969a13805908fb72043ce7cc896eb42e0b8afbe841dc8e7298923b061","model":"ggml-base.bin","modelCommit":"${WHISPER_MODEL_COMMIT}","modelSha1":"465707469ff3a37a2b9b8d8f89f2f99de7299dac","languages":["en","vi"]}
+          EOF
+          tar --zstd -C "$ROOT" -cf "$RUNNER_TEMP/out/ai-runtime-captions-whisper-v1.tar.zst" .
+          sha256sum "$RUNNER_TEMP/out/ai-runtime-captions-whisper-v1.tar.zst" > "$RUNNER_TEMP/out/SHA256SUMS-whisper.txt"
 
       - name: Upload Piper core bootstrap pack
         uses: actions/upload-artifact@v4
@@ -100,3 +154,14 @@ jobs:
         with:
           name: ai-runtime-voice-piper-checksums-v1
           path: ${{ runner.temp }}/out/SHA256SUMS-piper.txt
+      - name: Upload Whisper alignment pack
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-runtime-captions-whisper-v1
+          path: ${{ runner.temp }}/out/ai-runtime-captions-whisper-v1.tar.zst
+          compression-level: 0
+      - name: Upload Whisper checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-runtime-captions-whisper-checksums-v1
+          path: ${{ runner.temp }}/out/SHA256SUMS-whisper.txt
