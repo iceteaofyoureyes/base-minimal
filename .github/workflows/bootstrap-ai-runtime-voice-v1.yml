@@ -15,29 +15,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup Python 3.13
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-
       - name: Install packaging tools
-        shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg zstd
-
       - name: Build Piper runtime and bilingual voice packs
         shell: bash
         run: |
           set -euo pipefail
           ROOT="$RUNNER_TEMP/ai-runtime-voice"
           mkdir -p "$ROOT/piper/python" "$ROOT/piper/bin" "$ROOT/en" "$ROOT/vi" "$RUNNER_TEMP/out"
-
-          python -m pip install --disable-pip-version-check --only-binary=:all: \
-            --target "$ROOT/piper/python" "piper-tts==${PIPER_VERSION}"
-
+          python -m pip install --disable-pip-version-check --only-binary=:all: --target "$ROOT/piper/python" "piper-tts==${PIPER_VERSION}"
           cat > "$ROOT/piper/bin/piper" <<'SH'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -46,34 +39,21 @@ jobs:
           exec python3 -m piper "$@"
           SH
           chmod +x "$ROOT/piper/bin/piper"
-
           BASE="https://huggingface.co/rhasspy/piper-voices/resolve/${PIPER_VOICES_COMMIT}"
           curl -fL --retry 3 "$BASE/en/en_US/joe/medium/en_US-joe-medium.onnx" -o "$ROOT/en/en_US-joe-medium.onnx"
           curl -fL --retry 3 "$BASE/en/en_US/joe/medium/en_US-joe-medium.onnx.json" -o "$ROOT/en/en_US-joe-medium.onnx.json"
           curl -fL --retry 3 "$BASE/en/en_US/joe/medium/MODEL_CARD" -o "$ROOT/en/MODEL_CARD"
-
           curl -fL --retry 3 "$BASE/vi/vi_VN/vais1000/medium/vi_VN-vais1000-medium.onnx" -o "$ROOT/vi/vi_VN-vais1000-medium.onnx"
           curl -fL --retry 3 "$BASE/vi/vi_VN/vais1000/medium/vi_VN-vais1000-medium.onnx.json" -o "$ROOT/vi/vi_VN-vais1000-medium.onnx.json"
           curl -fL --retry 3 "$BASE/vi/vi_VN/vais1000/medium/MODEL_CARD" -o "$ROOT/vi/MODEL_CARD"
-
           echo "74fd6a4dc39e0aa9dce145d7f5acd4f6  $ROOT/en/en_US-joe-medium.onnx" | md5sum -c -
           echo "811036b9c1451545f9495fdc1baa0754  $ROOT/en/en_US-joe-medium.onnx.json" | md5sum -c -
           echo "5e42428c4f6131f75557cf156c9c1526  $ROOT/vi/vi_VN-vais1000-medium.onnx" | md5sum -c -
           echo "5ec9669253541d64ba97f60e422f1ad0  $ROOT/vi/vi_VN-vais1000-medium.onnx.json" | md5sum -c -
-
-          PIPER_BIN="$ROOT/piper/bin/piper"
-          EN_MODEL="$ROOT/en/en_US-joe-medium.onnx"
-          VI_MODEL="$ROOT/vi/vi_VN-vais1000-medium.onnx"
-          test -x "$PIPER_BIN"
-          test -s "$EN_MODEL"
-          test -s "$VI_MODEL"
-
-          "$PIPER_BIN" -m "$EN_MODEL" -f /tmp/en.wav -- "Offline runtime test. AI-Runtime can narrate without network access."
-          "$PIPER_BIN" -m "$VI_MODEL" -f /tmp/vi.wav -- "Đây là bài kiểm tra chạy hoàn toàn cục bộ. AI-Runtime có thể lồng tiếng tiếng Việt."
-
+          "$ROOT/piper/bin/piper" -m "$ROOT/en/en_US-joe-medium.onnx" -f /tmp/en.wav -- "Offline runtime test. AI-Runtime can narrate without network access."
+          "$ROOT/piper/bin/piper" -m "$ROOT/vi/vi_VN-vais1000-medium.onnx" -f /tmp/vi.wav -- "Đây là bài kiểm tra chạy hoàn toàn cục bộ. AI-Runtime có thể lồng tiếng tiếng Việt."
           ffprobe -v error -show_entries stream=codec_name,sample_rate,channels -of json /tmp/en.wav
           ffprobe -v error -show_entries stream=codec_name,sample_rate,channels -of json /tmp/vi.wav
-
           cat > "$ROOT/piper/manifest.json" <<EOF
           {"name":"ai-runtime-media-voice-core-bootstrap-v1","piperVersion":"${PIPER_VERSION}","platform":"linux-x86_64","pythonAbi":"cp39-abi3","entrypoint":"bin/piper"}
           EOF
@@ -83,11 +63,19 @@ jobs:
           cat > "$ROOT/vi/manifest.json" <<EOF
           {"name":"ai-runtime-voice-vi-piper-v1","voice":"vi_VN-vais1000-medium","sourceCommit":"${PIPER_VOICES_COMMIT}","modelMd5":"5e42428c4f6131f75557cf156c9c1526","configMd5":"5ec9669253541d64ba97f60e422f1ad0"}
           EOF
-
           tar --zstd -C "$ROOT/piper" -cf "$RUNNER_TEMP/out/ai-runtime-media-voice-core-bootstrap-v1.tar.zst" .
           tar --zstd -C "$ROOT/en" -cf "$RUNNER_TEMP/out/ai-runtime-voice-en-piper-v1.tar.zst" .
           tar --zstd -C "$ROOT/vi" -cf "$RUNNER_TEMP/out/ai-runtime-voice-vi-piper-v1.tar.zst" .
-          sha256sum "$RUNNER_TEMP/out/"*.tar.zst | tee "$RUNNER_TEMP/out/SHA256SUMS-piper.txt"
+          sha256sum "$RUNNER_TEMP/out/"*.tar.zst > "$RUNNER_TEMP/out/SHA256SUMS-piper.txt"
+
+      - name: RED - assert missing Whisper artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          WHISPER_BIN="$RUNNER_TEMP/ai-runtime-whisper/bin/whisper-cli"
+          WHISPER_MODEL="$RUNNER_TEMP/ai-runtime-whisper/models/ggml-base.bin"
+          test -x "$WHISPER_BIN"
+          test -s "$WHISPER_MODEL"
 
       - name: Upload Piper core bootstrap pack
         uses: actions/upload-artifact@v4
@@ -95,21 +83,18 @@ jobs:
           name: ai-runtime-media-voice-core-bootstrap-v1
           path: ${{ runner.temp }}/out/ai-runtime-media-voice-core-bootstrap-v1.tar.zst
           compression-level: 0
-
       - name: Upload English voice pack
         uses: actions/upload-artifact@v4
         with:
           name: ai-runtime-voice-en-piper-v1
           path: ${{ runner.temp }}/out/ai-runtime-voice-en-piper-v1.tar.zst
           compression-level: 0
-
       - name: Upload Vietnamese voice pack
         uses: actions/upload-artifact@v4
         with:
           name: ai-runtime-voice-vi-piper-v1
           path: ${{ runner.temp }}/out/ai-runtime-voice-vi-piper-v1.tar.zst
           compression-level: 0
-
       - name: Upload Piper checksums
         uses: actions/upload-artifact@v4
         with:
