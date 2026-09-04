@@ -1,0 +1,157 @@
+name: Bootstrap VieNeu TTS V1
+
+on:
+  push:
+    branches:
+      - bootstrap/vieneu-tts-v1
+  workflow_dispatch:
+
+jobs:
+  build-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      VIENEU_VERSION: "3.2.3"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install system dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg zstd libsndfile1 libespeak-ng1 espeak-ng-data
+
+      - name: Build VieNeu CPU ONNX runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/vieneu-runtime"
+          OUT="$RUNNER_TEMP/out"
+          mkdir -p "$ROOT/python" "$ROOT/hf" "$ROOT/bin" "$ROOT/system" "$OUT" "$ROOT/samples"
+
+          python -m pip install --disable-pip-version-check --only-binary=:all: --target "$ROOT/python" --no-deps "vieneu==${VIENEU_VERSION}"
+          python -m pip install --disable-pip-version-check --only-binary=:all: --target "$ROOT/python" \
+            "sea-g2p>=0.7.20" "onnxruntime>=1.20.0" numpy soundfile soxr \
+            "tokenizers>=0.20" huggingface_hub PyYAML
+
+          LIB_ESPEAK="$(ldconfig -p | awk '/libespeak-ng.so.1/{print $NF; exit}')"
+          test -n "$LIB_ESPEAK"
+          cp -L "$LIB_ESPEAK" "$ROOT/system/libespeak-ng.so.1"
+          DATA_DIR="$(dpkg -L espeak-ng-data | awk '/espeak-ng-data$/ && $0 ~ /^\/usr\// {print; exit}')"
+          test -d "$DATA_DIR"
+          cp -a "$DATA_DIR" "$ROOT/system/espeak-ng-data"
+
+          cat > "$ROOT/synth.py" <<'PY'
+          from __future__ import annotations
+          import argparse
+          from pathlib import Path
+          from vieneu import Vieneu
+
+          p = argparse.ArgumentParser()
+          p.add_argument('--text')
+          p.add_argument('--text-file')
+          p.add_argument('--voice', default='Minh Đức')
+          p.add_argument('--out', required=True)
+          p.add_argument('--threads', type=int, default=4)
+          p.add_argument('--list-voices', action='store_true')
+          args = p.parse_args()
+
+          tts = Vieneu(backend='onnx', precision='int8', threads=args.threads)
+          if args.list_voices:
+              for label, voice_id in tts.list_preset_voices():
+                  print(f'{voice_id}\t{label}')
+              raise SystemExit(0)
+          text = args.text
+          if args.text_file:
+              text = Path(args.text_file).read_text(encoding='utf-8').strip()
+          if not text:
+              raise SystemExit('empty text')
+          audio = tts.infer(text, voice=args.voice)
+          tts.save(audio, args.out)
+          PY
+
+          cat > "$ROOT/bin/vieneu-synth" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+          export PYTHONPATH="$HERE/python${PYTHONPATH:+:$PYTHONPATH}"
+          export HF_HOME="$HERE/hf"
+          export HF_HUB_DISABLE_TELEMETRY=1
+          export HF_HUB_OFFLINE=1
+          export TRANSFORMERS_OFFLINE=1
+          export PHONEMIZER_ESPEAK_LIBRARY="$HERE/system/libespeak-ng.so.1"
+          export ESPEAK_DATA_PATH="$HERE/system/espeak-ng-data"
+          export LD_LIBRARY_PATH="$HERE/system${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          exec python3 "$HERE/synth.py" "$@"
+          SH
+          chmod +x "$ROOT/bin/vieneu-synth"
+
+          export PYTHONPATH="$ROOT/python"
+          export HF_HOME="$ROOT/hf"
+          export PHONEMIZER_ESPEAK_LIBRARY="$ROOT/system/libespeak-ng.so.1"
+          export ESPEAK_DATA_PATH="$ROOT/system/espeak-ng-data"
+          export LD_LIBRARY_PATH="$ROOT/system${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+          SCRIPT='AI-Runtime giờ có thể tạo giọng đọc tiếng Việt tự nhiên hơn, hoàn toàn cục bộ, không cần Internet khi render video.'
+          python3 "$ROOT/synth.py" --list-voices --out /tmp/unused.wav | tee "$ROOT/voices.txt"
+          for VOICE in 'Minh Đức' 'Phạm Tuyên' 'Trúc Ly'; do
+            SAFE="$(echo "$VOICE" | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null | tr ' ' '_' | tr -cd 'A-Za-z0-9_-')"
+            python3 "$ROOT/synth.py" --text "$SCRIPT" --voice "$VOICE" --out "$ROOT/samples/${SAFE}.wav" --threads 4
+          done
+
+          # Prove the already-populated runtime works with network disabled.
+          export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+          "$ROOT/bin/vieneu-synth" --text 'Đây là kiểm tra VieNeu chạy offline trong AI-Runtime.' --voice 'Minh Đức' --out /tmp/offline-vieneu.wav --threads 4
+          ffprobe -v error -show_entries stream=codec_name,sample_rate,channels,duration -of json /tmp/offline-vieneu.wav
+          test "$(find "$ROOT/hf" -type f | wc -l)" -gt 5
+
+          cat > "$ROOT/manifest.json" <<EOF
+          {
+            "name": "ai-runtime-voice-vi-vieneu-v1",
+            "vieneuVersion": "${VIENEU_VERSION}",
+            "backend": "onnx",
+            "precision": "int8",
+            "sampleRate": 48000,
+            "defaultVoice": "Minh Đức",
+            "platform": "linux-x86_64",
+            "python": "3.13"
+          }
+          EOF
+
+          du -sh "$ROOT" "$ROOT/python" "$ROOT/hf" "$ROOT/system" || true
+          tar --zstd -C "$ROOT" -cf "$OUT/ai-runtime-voice-vi-vieneu-v1.tar.zst" .
+          sha256sum "$OUT/ai-runtime-voice-vi-vieneu-v1.tar.zst" > "$OUT/SHA256SUMS-vieneu.txt"
+          cp "$ROOT/samples/"*.wav "$OUT/"
+          cp "$ROOT/voices.txt" "$OUT/"
+
+      - name: Upload VieNeu runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-runtime-voice-vi-vieneu-v1
+          path: ${{ runner.temp }}/out/ai-runtime-voice-vi-vieneu-v1.tar.zst
+          compression-level: 0
+          retention-days: 90
+
+      - name: Upload voice samples
+        uses: actions/upload-artifact@v4
+        with:
+          name: vieneu-voice-samples-v1
+          path: |
+            ${{ runner.temp }}/out/*.wav
+            ${{ runner.temp }}/out/voices.txt
+          compression-level: 0
+          retention-days: 90
+
+      - name: Upload checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: vieneu-checksum-v1
+          path: ${{ runner.temp }}/out/SHA256SUMS-vieneu.txt
