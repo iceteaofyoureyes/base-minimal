@@ -1,0 +1,25 @@
+name: Bootstrap AI Runtime Voice V1
+
+on:
+  push:
+    branches:
+      - bootstrap/voice-captions-v1
+  workflow_dispatch:
+
+jobs:
+  build-runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: RED - assert missing Piper artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          PIPER_BIN="$RUNNER_TEMP/ai-runtime-voice/piper/piper"
+          EN_MODEL="$RUNNER_TEMP/ai-runtime-voice/en/en_US-joe-medium.onnx"
+          VI_MODEL="$RUNNER_TEMP/ai-runtime-voice/vi/vi_VN-vais1000-medium.onnx"
+          test -x "$PIPER_BIN"
+          test -s "$EN_MODEL"
+          test -s "$VI_MODEL"
