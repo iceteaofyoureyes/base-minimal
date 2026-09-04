@@ -107,7 +107,6 @@ jobs:
             python3 "$ROOT/synth.py" --text "$SCRIPT" --voice "$VOICE" --out "$ROOT/samples/${SAFE}.wav" --threads 4
           done
 
-          # Prove the already-populated runtime works with network disabled.
           export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
           "$ROOT/bin/vieneu-synth" --text 'Đây là kiểm tra VieNeu chạy offline trong AI-Runtime.' --voice 'Minh Đức' --out /tmp/offline-vieneu.wav --threads 4
           ffprobe -v error -show_entries stream=codec_name,sample_rate,channels,duration -of json /tmp/offline-vieneu.wav
@@ -127,16 +126,77 @@ jobs:
           EOF
 
           du -sh "$ROOT" "$ROOT/python" "$ROOT/hf" "$ROOT/system" || true
-          tar --zstd -C "$ROOT" -cf "$OUT/ai-runtime-voice-vi-vieneu-v1.tar.zst" .
-          sha256sum "$OUT/ai-runtime-voice-vi-vieneu-v1.tar.zst" > "$OUT/SHA256SUMS-vieneu.txt"
+          ARCHIVE="$OUT/ai-runtime-voice-vi-vieneu-v1.tar.zst"
+          tar --zstd -C "$ROOT" -cf "$ARCHIVE" .
+          sha256sum "$ARCHIVE" > "$OUT/SHA256SUMS-vieneu.txt"
+
+          # ChatGPT Files materialization has a per-file ceiling; split the
+          # persistent runtime into independently materializable 64 MiB chunks.
+          split -b 64M -d -a 2 "$ARCHIVE" "$OUT/ai-runtime-voice-vi-vieneu-v1.tar.zst.part-"
+          PART_COUNT="$(find "$OUT" -maxdepth 1 -name 'ai-runtime-voice-vi-vieneu-v1.tar.zst.part-*' | wc -l)"
+          test "$PART_COUNT" -eq 5
+          sha256sum "$OUT"/ai-runtime-voice-vi-vieneu-v1.tar.zst.part-* > "$OUT/SHA256SUMS-vieneu-parts.txt"
+          cat > "$OUT/restore-vieneu-v1.sh" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          SRC="${1:-.}"
+          DEST="${2:-./vieneu-runtime}"
+          TMP="${TMPDIR:-/tmp}/ai-runtime-vieneu-v1-$$.tar.zst"
+          cat "$SRC"/ai-runtime-voice-vi-vieneu-v1.tar.zst.part-* > "$TMP"
+          mkdir -p "$DEST"
+          tar --zstd -xf "$TMP" -C "$DEST"
+          rm -f "$TMP"
+          SH
+          chmod +x "$OUT/restore-vieneu-v1.sh"
+
           cp "$ROOT/samples/"*.wav "$OUT/"
           cp "$ROOT/voices.txt" "$OUT/"
+          ls -lh "$OUT"/ai-runtime-voice-vi-vieneu-v1.tar.zst.part-*
 
-      - name: Upload VieNeu runtime
+      - name: Upload VieNeu part 00
         uses: actions/upload-artifact@v4
         with:
-          name: ai-runtime-voice-vi-vieneu-v1
-          path: ${{ runner.temp }}/out/ai-runtime-voice-vi-vieneu-v1.tar.zst
+          name: ai-runtime-voice-vi-vieneu-v1-part-00
+          path: ${{ runner.temp }}/out/ai-runtime-voice-vi-vieneu-v1.tar.zst.part-00
+          compression-level: 0
+          retention-days: 90
+      - name: Upload VieNeu part 01
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-runtime-voice-vi-vieneu-v1-part-01
+          path: ${{ runner.temp }}/out/ai-runtime-voice-vi-vieneu-v1.tar.zst.part-01
+          compression-level: 0
+          retention-days: 90
+      - name: Upload VieNeu part 02
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-runtime-voice-vi-vieneu-v1-part-02
+          path: ${{ runner.temp }}/out/ai-runtime-voice-vi-vieneu-v1.tar.zst.part-02
+          compression-level: 0
+          retention-days: 90
+      - name: Upload VieNeu part 03
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-runtime-voice-vi-vieneu-v1-part-03
+          path: ${{ runner.temp }}/out/ai-runtime-voice-vi-vieneu-v1.tar.zst.part-03
+          compression-level: 0
+          retention-days: 90
+      - name: Upload VieNeu part 04
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-runtime-voice-vi-vieneu-v1-part-04
+          path: ${{ runner.temp }}/out/ai-runtime-voice-vi-vieneu-v1.tar.zst.part-04
+          compression-level: 0
+          retention-days: 90
+
+      - name: Upload restore metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-runtime-voice-vi-vieneu-v1-metadata
+          path: |
+            ${{ runner.temp }}/out/SHA256SUMS-vieneu.txt
+            ${{ runner.temp }}/out/SHA256SUMS-vieneu-parts.txt
+            ${{ runner.temp }}/out/restore-vieneu-v1.sh
           compression-level: 0
           retention-days: 90
 
@@ -149,9 +209,3 @@ jobs:
             ${{ runner.temp }}/out/voices.txt
           compression-level: 0
           retention-days: 90
-
-      - name: Upload checksum
-        uses: actions/upload-artifact@v4
-        with:
-          name: vieneu-checksum-v1
-          path: ${{ runner.temp }}/out/SHA256SUMS-vieneu.txt
