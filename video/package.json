@@ -1,0 +1,22 @@
+{
+  "name": "biihappy-iwedding-remotion-demo",
+  "private": true,
+  "scripts": {
+    "capture": "node capture.mjs",
+    "render": "remotion render src/index.tsx BiihappyWedding out/biihappy-iwedding-demo.mp4 --codec=h264 --crf=18 --audio-codec=aac --pixel-format=yuv420p"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.459",
+    "@remotion/captions": "4.0.459",
+    "playwright": "1.57.0",
+    "qrcode": "1.5.4",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "remotion": "4.0.459"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.28",
+    "@types/react-dom": "18.3.7",
+    "typescript": "5.8.3"
+  }
+}
