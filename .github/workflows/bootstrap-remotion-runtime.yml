@@ -1,0 +1,129 @@
+name: Bootstrap Remotion Runtime
+
+on:
+  push:
+    branches:
+      - bootstrap/remotion-runtime-v1
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Create isolated Remotion runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .remotion-runtime-bootstrap
+          mkdir -p .remotion-runtime-bootstrap/src .remotion-runtime-bootstrap/out
+          cd .remotion-runtime-bootstrap
+
+          cat > package.json <<'JSON'
+          {
+            "name": "ai-runtime-remotion",
+            "version": "1.0.0",
+            "private": true,
+            "dependencies": {
+              "@remotion/bundler": "4.0.459",
+              "@remotion/captions": "4.0.459",
+              "@remotion/cli": "4.0.459",
+              "@remotion/media": "4.0.459",
+              "@remotion/player": "4.0.459",
+              "@remotion/renderer": "4.0.459",
+              "@remotion/transitions": "4.0.459",
+              "@remotion/zod-types": "4.0.459",
+              "react": "18.3.1",
+              "react-dom": "18.3.1",
+              "remotion": "4.0.459",
+              "zod": "4.3.6"
+            }
+          }
+          JSON
+
+          npm install --no-audit --no-fund
+          npx remotion browser ensure
+
+          cat > src/index.tsx <<'TSX'
+          import React from 'react';
+          import {AbsoluteFill, Composition, interpolate, registerRoot, useCurrentFrame} from 'remotion';
+
+          const Smoke: React.FC = () => {
+            const frame = useCurrentFrame();
+            const opacity = interpolate(frame, [0, 15], [0, 1], {extrapolateRight: 'clamp'});
+            return (
+              <AbsoluteFill style={{backgroundColor: '#111827', color: 'white', alignItems: 'center', justifyContent: 'center'}}>
+                <div style={{fontFamily: 'sans-serif', fontSize: 76, fontWeight: 700, opacity}}>AI-Runtime Remotion</div>
+                <div style={{fontFamily: 'sans-serif', fontSize: 32, marginTop: 24}}>4.0.459 · offline-ready</div>
+              </AbsoluteFill>
+            );
+          };
+
+          const Root: React.FC = () => (
+            <Composition id="Smoke" component={Smoke} durationInFrames={60} fps={30} width={1280} height={720} />
+          );
+
+          registerRoot(Root);
+          TSX
+
+          npx remotion render src/index.tsx Smoke out/smoke.mp4 --codec=h264
+
+          node <<'NODE'
+          const fs = require('fs');
+          const os = require('os');
+          const pkg = (n) => require(`./node_modules/${n}/package.json`).version;
+          fs.writeFileSync('manifest.json', JSON.stringify({
+            pack: 'media-remotion-v1',
+            createdAt: new Date().toISOString(),
+            platform: `${process.platform}-${process.arch}`,
+            node: process.version,
+            remotion: pkg('remotion'),
+            remotionCli: pkg('@remotion/cli'),
+            remotionRenderer: pkg('@remotion/renderer'),
+            react: pkg('react'),
+            host: `${os.platform()} ${os.release()}`,
+            browserCacheIncluded: fs.existsSync('node_modules/.remotion')
+          }, null, 2));
+          NODE
+
+          cat > activate.sh <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          RUNTIME_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          export PATH="$RUNTIME_DIR/node_modules/.bin:$PATH"
+          export NODE_PATH="$RUNTIME_DIR/node_modules${NODE_PATH:+:$NODE_PATH}"
+          export REMOTION_RUNTIME_DIR="$RUNTIME_DIR"
+          echo "Remotion runtime activated: $RUNTIME_DIR"
+          node -p "'remotion=' + require('$RUNTIME_DIR/node_modules/remotion/package.json').version"
+          SH
+          chmod +x activate.sh
+
+          tar --zstd -cf ../ai-runtime-media-remotion-v1.tar.zst \
+            package.json package-lock.json manifest.json activate.sh node_modules
+
+      - name: Show artifact sizes
+        run: |
+          ls -lh ai-runtime-media-remotion-v1.tar.zst .remotion-runtime-bootstrap/out/smoke.mp4
+          sha256sum ai-runtime-media-remotion-v1.tar.zst > ai-runtime-media-remotion-v1.sha256
+
+      - name: Upload runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-runtime-media-remotion-v1
+          path: |
+            ai-runtime-media-remotion-v1.tar.zst
+            ai-runtime-media-remotion-v1.sha256
+            .remotion-runtime-bootstrap/out/smoke.mp4
+          if-no-files-found: error
+          retention-days: 7
